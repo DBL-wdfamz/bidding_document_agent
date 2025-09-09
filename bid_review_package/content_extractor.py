@@ -36,7 +36,7 @@ def extract_from_word(content, ext=".docx"):
 def extract_from_image(content):
     img_file = io.BytesIO(content)
     img = Image.open(img_file)
-    text = pytesseract.image_to_string(img)
+    text = pytesseract.image_to_string(img, lang="chi_sim")
     return text.strip()
 
 # 新增：提取Excel内容
@@ -157,3 +157,4 @@ if __name__ == "__main__":
     extracted_text = extract_content(url)
     print("Extracted Content:")
     print(extracted_text)
+
