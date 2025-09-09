@@ -1,0 +1,67 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+SQLAlchemy==2.0.36
+aiosqlite==0.20.0
+passlib[bcrypt]==1.7.4
+python-jose==3.3.0
+python-dotenv==1.0.1
+pydantic==2.9.2
+email-validator==2.2.0
+python-docx
+docx2pdf
+
+# MySQL 异步驱动
+aiomysql==0.2.0
+PyMySQL==1.1.1
+cryptography
+
+langchain-openai
+langchain
+langchain_community
+
+
+
+
+# 核心框架
+streamlit>=1.28.0
+
+# LangChain 相关
+langchain>=0.1.0
+langchain-community>=0.0.10
+langchain-openai>=0.0.5
+langchain-deepseek>=0.1.0
+langchain-core>=0.1.0
+
+# 向量数据库和嵌入
+faiss-cpu>=1.7.4
+langchain-huggingface>=0.0.1
+sentence-transformers>=2.2.2
+huggingface-hub>=0.20.0
+
+# 文档处理
+PyPDF2>=3.0.1
+python-docx>=0.8.11
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# 机器学习和数据处理
+scikit-learn>=1.3.0
+numpy>=1.24.0
+torch>=2.0.0
+transformers>=4.30.0
+
+# HTTP 请求和网络
+requests>=2.31.0
+httpx>=0.24.0
+
+# 其他工具
+typing-extensions>=4.5.0
+protobuf>=3.20.0
+safetensors>=0.3.0
+pypdf
+pdfplumber
+pypandoc
+lxml
+
+pytesseract>=0.3.0
+pymongo>=4.0.0
