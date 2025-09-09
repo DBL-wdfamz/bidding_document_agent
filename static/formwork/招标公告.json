@@ -1,0 +1,85 @@
+{
+  "documentType": "招标公告",
+  "pageSetup": {
+    "pageSize": "A4",
+    "orientation": "portrait",
+    "margins": {
+      "top": "3.7cm",
+      "bottom": "3.5cm",
+      "left": "2.8cm",
+      "right": "2.6cm"
+    },
+    "redHeader":{
+      "style":"redHeader",
+      "content":"某某公司文件",
+      "separatorLine":"true"
+    },
+    "yemei": {
+      "content": [
+        { "style": "yemei", "content": "XX市公共资源交易中心文件", "separatorLine": "true" }
+      ]
+    },
+    "footer": {
+      "content": [
+        { "style": "footerText", "content": "XX市公共资源交易中心文件" }
+      ]
+    },
+    "pageNumber": {
+      "style": "footerText",
+      "format": "- %p -"
+    }
+  },
+  "styles": {
+    "wenhao": { "fontFamily": "楷体_GB2312", "fontSize": "14pt", "alignment": "center", "spacing": { "after": "24pt" } },
+    "yemei": { "fontFamily": "方正小标宋_GBK", "fontSize": "12pt", "color": "#000000", "spacing": { "after": "12pt" } },
+    "footerText": { "fontFamily": "宋体", "fontSize": "12pt", "alignment": "center" },
+    "redHeader":{ "fontFamily": "方正小标宋_GBK", "fontSize": "25pt", "color": "#FF0000", "alignment": "center", "spacing": { "after": "12pt" } },
+    "title": {
+      "fontFamily": "黑体",
+      "fontSize": "22pt",
+      "color": "#000000",
+      "bold": true,
+      "italic": false,
+      "alignment": "center",
+      "spacing": { "before": "24pt", "after": "18pt", "lineRule": "auto" }
+    },
+    "subTitle": {
+      "fontFamily": "黑体",
+      "fontSize": "16pt",
+      "color": "#000000",
+      "bold": false,
+      "italic": false,
+      "alignment": "center",
+      "spacing": { "before": "0pt", "after": "12pt", "lineRule": "auto" }
+    },
+    "bodyText": {
+      "fontFamily": "仿宋_GB2312",
+      "fontSize": "16pt",
+      "color": "#000000",
+      "bold": false,
+      "italic": false,
+      "alignment": "justify",
+      "indentation": { "firstLine": "2em" },
+      "spacing": { "line": "28.8pt", "lineRule": "exactly" }
+    },
+    "heading1": {
+      "fontFamily": "黑体",
+      "fontSize": "16pt",
+      "color": "#000000",
+      "bold": false,
+      "italic": false,
+      "alignment": "left",
+      "indentation": { "firstLine": "2em" },
+      "spacing": { "before": "12pt", "after": "6pt", "lineRule": "auto" }
+    },
+    "signature": {
+      "fontFamily": "楷体_GB2312",
+      "fontSize": "16pt",
+      "color": "#000000",
+      "bold": false,
+      "italic": false,
+      "alignment": "right",
+      "spacing": { "before": "24pt", "after": "0pt", "lineRule": "auto" }
+    }
+  }
+}

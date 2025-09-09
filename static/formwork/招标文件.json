@@ -1,0 +1,84 @@
+{
+  "documentType": "招标文件",
+  "pageSetup": {
+    "pageSize": "A4",
+    "orientation": "portrait",
+    "margins": {
+      "top": "3.7cm",
+      "bottom": "3.5cm",
+      "left": "2.8cm",
+      "right": "2.6cm"
+    },
+    "redHeader":{
+      "style":"redHeader",
+      "content":"某某公司文件",
+      "separatorLine":"true"
+    },
+    "yemei": {
+      "content": [
+        { "style": "yemei", "content": "XX市公共资源交易中心文件", "separatorLine": "true" }
+      ]
+    },
+    "footer": {
+      "height": "2.5cm",
+      "content": []
+    },
+    "pageNumber": {
+      "style": "footerCenter",
+      "format": "第 %p 页 / 共 %P 页"
+    }
+  },
+  "styles": {
+    "wenhao": { "fontFamily": "楷体_GB2312", "fontSize": "14pt", "alignment": "center", "spacing": { "after": "24pt" } },
+    "yemei": { "fontFamily": "方正小标宋_GBK", "fontSize": "12pt", "color": "#000000", "spacing": { "after": "12pt" } },
+    "footerText": { "fontFamily": "宋体", "fontSize": "12pt", "alignment": "center" },
+    "redHeader":{ "fontFamily": "方正小标宋_GBK", "fontSize": "25pt", "color": "#FF0000", "alignment": "center", "spacing": { "after": "12pt" } },
+    "coverTitle": {
+      "fontFamily": "小标宋_GB2312",
+      "fontSize": "28pt",
+      "bold": true,
+      "alignment": "center"
+    },
+    "title": {
+      "fontFamily": "黑体",
+      "fontSize": "22pt",
+      "bold": true,
+      "alignment": "center",
+      "spacing": { "before": "24pt", "after": "18pt", "lineRule": "auto" }
+    },
+    "heading1": {
+      "fontFamily": "黑体",
+      "fontSize": "18pt",
+      "bold": true,
+      "alignment": "left",
+      "spacing": { "before": "18pt", "after": "12pt", "lineRule": "auto" }
+    },
+    "heading2": {
+      "fontFamily": "楷体_GB2312",
+      "fontSize": "16pt",
+      "bold": true,
+      "alignment": "left",
+      "spacing": { "before": "12pt", "after": "6pt", "lineRule": "auto" }
+    },
+    "heading3": {
+      "fontFamily": "仿宋_GB2312",
+      "fontSize": "16pt",
+      "bold": true,
+      "alignment": "left",
+      "spacing": { "before": "6pt", "after": "6pt", "lineRule": "auto" }
+    },
+    "bodyText": {
+      "fontFamily": "仿宋_GB2312",
+      "fontSize": "16pt",
+      "color": "#000000",
+      "alignment": "justify",
+      "indentation": { "firstLine": "2em" },
+      "spacing": { "line": "28.8pt", "lineRule": "exactly" }
+    },
+    "headerText": {
+      "fontFamily": "宋体",
+      "fontSize": "12pt",
+      "alignment": "center"
+    }
+  }
+}
