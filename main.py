@@ -6,10 +6,12 @@ import mimetypes
 import tempfile
 import secrets
 import shutil
+import smtplib
+from email.message import EmailMessage
 from datetime import timedelta, datetime
 from typing import Annotated, Optional, Union, List, Literal
 
-from fastapi import FastAPI, Depends, HTTPException, status, Body, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, Body, UploadFile, File, BackgroundTasks
 from fastapi import Path as PathParam
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.responses import FileResponse, StreamingResponse
@@ -58,6 +60,17 @@ REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./app.db")
 DOCNUMBER_DEFAULT_PREFIX = os.getenv("DOCNUMBER_DEFAULT_PREFIX", "测试公司(2025)第")
 DOCNUMBER_DEFAULT_START  = os.getenv("DOCNUMBER_DEFAULT_START", "100号")
+
+#意见反馈邮件发送
+SUGGEST_SMTP_HOST = os.getenv("SUGGEST_SMTP_HOST", "")
+SUGGEST_SMTP_PORT = int(os.getenv("SUGGEST_SMTP_PORT", "587"))  # 587=TLS, 465=SSL
+SUGGEST_SMTP_USER = os.getenv("SUGGEST_SMTP_USER", "")
+SUGGEST_SMTP_PASS = os.getenv("SUGGEST_SMTP_PASS", "")
+SUGGEST_MAIL_TO   = os.getenv("SUGGEST_MAIL_TO", "")           # 目标收件人，支持逗号分隔
+SUGGEST_MAIL_FROM = os.getenv("SUGGEST_MAIL_FROM", SUGGEST_SMTP_USER or "noreply@example.com")
+SUGGEST_USE_SSL   = os.getenv("SUGGEST_USE_SSL", "false").lower() == "true"
+SUGGEST_USE_STARTTLS = os.getenv("SUGGEST_USE_STARTTLS", "true").lower() == "true"
+
 EXPORT_ROOT = Path(os.getenv("EXPORT_ROOT", r"D:\project\document_agent\exports")).resolve()
 EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", "document_agent/media")).resolve()
@@ -109,7 +122,7 @@ class Job(Base):
     project_name: Mapped[str] = mapped_column(String(255), nullable=False)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     template_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    knowledge_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    knowledge_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)      # 原始输入
     file: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)  # 预留
     document: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 最终内容（建议 Text，如需很大可改 Text）
@@ -310,6 +323,9 @@ class DocNumberUpdateIn(BaseModel):
     full: Optional[str] = Field(default=None, description="完整文号，如：测试公司(2025)第207号")
     prefix: Optional[str] = Field(default=None, description="文号前缀，如：测试公司(2025)第")
     number_part: Optional[str] = Field(default=None, description="文号尾部，如：207号")
+
+class SuggestIn(BaseModel):
+    suggestions: str = Field(min_length=1, description="用户建议文本")
 
 # =========================
 # 依赖：获取当前用户
@@ -841,6 +857,154 @@ def build_references_hint_and_append_payload_info(
     else:
         combined = hint_text
     return hint_text, combined
+
+async def _prepare_review_input_from_job(
+    db: AsyncSession,
+    current_user: User,
+    payload: ReviewDraftIn,
+) -> tuple[str, list[str], int, int]:
+    """
+    参考 /api/v1/review-draft 的流程：
+    1) 取 job 并做所有权校验
+    2) 解析 job.document
+    3) 抽文本、切块
+    4) KB 检索、合并去重
+    5) build_review_payload 返回字符串 JSON
+    返回: (review_input_str, kb_ids(list[str]), chunks_count, rules_count)
+    """
+    # 1) job & 权限
+    job = await db.get(Job, payload.jobid)
+    if not job:
+        raise HTTPException(status_code=404, detail="job 不存在")
+    if job.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权访问该任务")
+    if not job.document:
+        raise HTTPException(status_code=400, detail="该 job 的 document 为空")
+
+    # 2) 解析 document
+    try:
+        doc_obj = json.loads(job.document)
+        if not isinstance(doc_obj, dict):
+            raise ValueError("document 必须为 JSON 对象")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"document JSON 解析失败: {e}")
+
+    # 3) 抽文本 & 切块（与 review-draft 保持一致）
+    texts = extract_text_blocks_from_document(doc_obj)
+    if not texts:
+        raise HTTPException(status_code=400, detail="未能从 document 中提取任何文本")
+    chunks = chunk_texts(texts, max_len=500)
+
+    # 4) 归一化 KB IDs 并逐块检索
+    kb_ids = normalize_kb_ids(payload.knowledge_base_id)
+    all_rules = []
+    try:
+        for c in chunks:
+            rules = await query_kbs_and_collect_ctx(
+                db=db,
+                owner_id=current_user.id,
+                kb_ids=kb_ids,
+                query_text=c,
+                per_kb_top_k=4,
+                recall_k=20,
+            )
+            if rules:
+                # query_kbs_and_collect_ctx 返回的是 list[dict]，取其 text 字段
+                for r in rules:
+                    txt = r.get("text")
+                    if txt:
+                        all_rules.append(txt)
+    except Exception as e:
+        all_rules.append(f"检索规则异常：{e}")
+
+    rules_final = uniq_rules(all_rules, limit=20)
+
+    # 5) 组装传给审查器的输入（字符串 JSON）
+    review_input = build_review_payload(doc_obj, rules_final)
+
+    return review_input, kb_ids, len(chunks), len(rules_final)
+
+async def _stream_single_agent(
+    review_func,              # 具体审查器，如 review_policy
+    review_type: str,         # 标签，如 "政策审查"
+    review_input: str,        # 上一步得到的字符串 JSON
+    kb_ids: list[str],
+    chunks_count: int,
+    rules_count: int,
+):
+    async def gen():
+        # 起始行
+        yield _ndjson_line({
+            "phase": "start",
+            "type": review_type,
+            "kb_ids": kb_ids,
+            "chunks": chunks_count,
+            "rules_count": rules_count
+        })
+
+        buffer = ""
+        in_array = False
+        try:
+            async for chunk in review_func(review_input):
+                buffer += chunk
+                if not in_array:
+                    if "[" in buffer:
+                        in_array = True
+                        buffer = buffer[buffer.find("["):]
+                    else:
+                        continue
+                while "{" in buffer and "}" in buffer:
+                    s = buffer.find("{"); e = buffer.find("}")
+                    if s < e:
+                        obj_str = buffer[s:e+1]
+                        try:
+                            obj = json.loads(obj_str)
+                            yield _ndjson_line({
+                                "phase": "suggestion",
+                                "type": review_type,
+                                "data": obj
+                            })
+                            buffer = buffer[e+1:]
+                        except json.JSONDecodeError:
+                            break
+                    else:
+                        buffer = buffer[s:]
+                        break
+        except Exception as e:
+            yield _ndjson_line({"phase": "error", "type": review_type, "message": str(e)})
+
+        yield _ndjson_line({"phase": "agent_done", "type": review_type})
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+def _send_mail_sync(subject: str, body: str):
+    if not (SUGGEST_SMTP_HOST and SUGGEST_SMTP_PORT and SUGGEST_SMTP_USER and SUGGEST_SMTP_PASS and SUGGEST_MAIL_TO):
+        raise RuntimeError("建议邮箱未配置完整：请设置 SUGGEST_SMTP_HOST/PORT/USER/PASS/MAIL_TO")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SUGGEST_MAIL_FROM
+    msg["To"] = SUGGEST_MAIL_TO
+    msg.set_content(body)
+
+    if SUGGEST_USE_SSL:
+        with smtplib.SMTP_SSL(SUGGEST_SMTP_HOST, SUGGEST_SMTP_PORT, timeout=20) as server:
+            server.login(SUGGEST_SMTP_USER, SUGGEST_SMTP_PASS)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(SUGGEST_SMTP_HOST, SUGGEST_SMTP_PORT, timeout=20) as server:
+            if SUGGEST_USE_STARTTLS:
+                server.starttls()
+            server.login(SUGGEST_SMTP_USER, SUGGEST_SMTP_PASS)
+            server.send_message(msg)
 
 
 
@@ -1935,4 +2099,79 @@ async def update_user_docnumber(
         "message": "文号已更新",
     }
 
-#5个审查模型接口
+
+@app.post("/api/v1/reviews/fiscal", summary="财政审查（按 jobid，规则来自知识库，NDJSON）- 需JWT")
+async def review_agent_fiscal_by_job(
+    payload: ReviewDraftIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_auth())],
+):
+    review_input, kb_ids, chunks_cnt, rules_cnt = await _prepare_review_input_from_job(db, current_user, payload)
+    return await _stream_single_agent(review_fiscal, "财政审查", review_input, kb_ids, chunks_cnt, rules_cnt)
+
+@app.post("/api/v1/reviews/style", summary="风格审查（按 jobid，规则来自知识库，NDJSON）- 需JWT")
+async def review_agent_style_by_job(
+    payload: ReviewDraftIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_auth())],
+):
+    review_input, kb_ids, chunks_cnt, rules_cnt = await _prepare_review_input_from_job(db, current_user, payload)
+    return await _stream_single_agent(review_style, "风格审查", review_input, kb_ids, chunks_cnt, rules_cnt)
+
+@app.post("/api/v1/reviews/policy", summary="政策审查（按 jobid，规则来自知识库，NDJSON）- 需JWT")
+async def review_agent_policy_by_job(
+    payload: ReviewDraftIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_auth())],
+):
+    review_input, kb_ids, chunks_cnt, rules_cnt = await _prepare_review_input_from_job(db, current_user, payload)
+    return await _stream_single_agent(review_policy, "政策审查", review_input, kb_ids, chunks_cnt, rules_cnt)
+
+@app.post("/api/v1/reviews/docnumber", summary="文号审查（按 jobid，规则来自知识库，NDJSON）- 需JWT")
+async def review_agent_docnumber_by_job(
+    payload: ReviewDraftIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_auth())],
+):
+    review_input, kb_ids, chunks_cnt, rules_cnt = await _prepare_review_input_from_job(db, current_user, payload)
+    return await _stream_single_agent(review_document_number, "文号审查", review_input, kb_ids, chunks_cnt, rules_cnt)
+
+@app.post("/api/v1/reviews/completeness", summary="完整性审查（按 jobid，规则来自知识库，NDJSON）- 需JWT")
+async def review_agent_completeness_by_job(
+    payload: ReviewDraftIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_auth())],
+):
+    review_input, kb_ids, chunks_cnt, rules_cnt = await _prepare_review_input_from_job(db, current_user, payload)
+    return await _stream_single_agent(review_completeness, "完整性审查", review_input, kb_ids, chunks_cnt, rules_cnt)
+
+
+@app.post("/api/v1/suggest", summary="提交用户建议（发送到指定邮箱）- 需JWT")
+async def submit_suggestion(
+    payload: SuggestIn,
+    background: BackgroundTasks,
+    current_user: Annotated[User, Depends(require_auth())],
+):
+    # 基本校验
+    text = (payload.suggestions or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="建议内容不能为空")
+
+    # 组装主题与正文
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    subject = f"[建议反馈] uid={current_user.id} user={current_user.username} @ {now_str}"
+    body = (
+        f"来自用户的建议：\n\n"
+        f"用户ID：{current_user.id}\n"
+        f"用户名：{current_user.username}\n"
+        f"时间：{now_str}\n\n"
+        f"建议内容：\n{text}\n"
+    )
+
+    # 后台发送（避免阻塞）
+    try:
+        background.add_task(_send_mail_sync, subject, body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"添加发送任务失败：{e}")
+
+    return {"ok": True, "queued": True, "message": "建议已接收并将邮件发送给管理员"}
