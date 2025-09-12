@@ -131,6 +131,15 @@ def _apply_page(doc: Document, page_setup: Dict[str,Any], styles: Dict[str,Any])
     if 'left' in m:   sec.left_margin   = _cm(m['left'])
     if 'right' in m:  sec.right_margin  = _cm(m['right'])
 
+    hd = m.get('yemei_top') or m.get('headerTop') or m.get('header_distance')
+    if hd is not None:
+        sec.header_distance = _cm(hd)
+
+    fd = (m.get('yejiao_bottom') or m.get('footerBottom') or
+          m.get('footer_distance') or m.get('yemei_bottom'))  # 兼容把 yemei_bottom 当“页脚距边界”的旧数据
+    if fd is not None:
+        sec.footer_distance = _cm(fd)
+
     # --------- 页眉：首页与非首页 ----------
     hongtou = page_setup.get('redHeader')  # {"style":"hongtou", "content":"xxx", "separatorLine":true}
     header_cfg = (page_setup.get('yemei') or {}).get('content', [])  # 列表，每项含 style、content
@@ -378,7 +387,9 @@ json_data = {
       "top": "3.7cm",
       "bottom": "3.5cm",
       "left": "2.8cm",
-      "right": "2.6cm"
+      "right": "2.6cm",
+      "yemei_top": "1cm",
+      "yejiao_bottom": "1cm"
     },
     "redHeader":{
       "style":"redHeader",
