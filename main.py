@@ -23,6 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from dotenv import load_dotenv
 from dataclasses import dataclass
+from contextlib import suppress
 
 import hashlib
 import json
@@ -70,6 +71,11 @@ SUGGEST_MAIL_TO   = os.getenv("SUGGEST_MAIL_TO", "")           # 目标收件人
 SUGGEST_MAIL_FROM = os.getenv("SUGGEST_MAIL_FROM", SUGGEST_SMTP_USER or "noreply@example.com")
 SUGGEST_USE_SSL   = os.getenv("SUGGEST_USE_SSL", "false").lower() == "true"
 SUGGEST_USE_STARTTLS = os.getenv("SUGGEST_USE_STARTTLS", "true").lower() == "true"
+
+EXPORT_TTL_DAYS = int(os.getenv("EXPORT_TTL_DAYS", "7"))           # 导出文件保留天数
+MEDIA_TTL_DAYS  = int(os.getenv("MEDIA_TTL_DAYS", "30"))           # 媒体库文件保留天数
+CLEAN_INTERVAL_MINUTES = int(os.getenv("CLEAN_INTERVAL_MINUTES", "60"))  # 清理频率（分钟）
+CLEAN_REMOVE_EMPTY_DIRS = os.getenv("CLEAN_REMOVE_EMPTY_DIRS", "true").lower() == "true"
 
 EXPORT_ROOT = Path(os.getenv("EXPORT_ROOT", r"D:\project\document_agent\exports")).resolve()
 EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1006,6 +1012,142 @@ def _send_mail_sync(subject: str, body: str):
             server.login(SUGGEST_SMTP_USER, SUGGEST_SMTP_PASS)
             server.send_message(msg)
 
+
+_cleanup_lock = asyncio.Lock()
+
+def _is_child_path(child: Path, parent: Path) -> bool:
+    """确保 child 在 parent 内（防止路径穿越/误删）。"""
+    try:
+        child = child.resolve()
+        parent = parent.resolve()
+        return parent in child.parents or child == parent
+    except Exception:
+        return False
+
+def _should_skip(p: Path) -> bool:
+    """跳过一些不应删除的文件名/后缀（可按需扩展）"""
+    name = p.name.lower()
+    if name in {".gitkeep", ".keep"}:
+        return True
+    if name.startswith("."):          # 隐藏文件
+        return True
+    # 这里不跳过扩展名，以免用户确实要清理任意类型
+    return False
+
+def _file_age_days(p: Path) -> float:
+    st = p.stat()
+    # 用 mtime（修改时间）衡量；你也可以换 atime/ctime
+    return max(0.0, (time.time() - st.st_mtime) / 86400.0)
+
+def _safe_unlink(p: Path) -> bool:
+    with suppress(Exception):
+        if p.is_file() or p.is_symlink():
+            p.unlink(missing_ok=True)
+            return True
+    return False
+
+def _safe_rmdir_empty(d: Path) -> bool:
+    """仅删除空目录"""
+    with suppress(Exception):
+        d.rmdir()
+        return True
+    return False
+
+def _clean_dir_once(
+    root: Path,
+    ttl_days: int,
+    *,
+    dry_run: bool = False,
+    remove_empty_dirs: bool = True,
+) -> dict:
+    """
+    清理 root 下“超过 ttl_days”的普通文件。返回统计信息。
+    仅处理 root 内的内容；不跨越根目录。可 dry-run。
+    """
+    root = root.resolve()
+    deleted_files = 0
+    skipped_files = 0
+    errors = 0
+    candidates = 0
+    freed_bytes = 0
+
+    if not root.exists() or not root.is_dir():
+        return {
+            "root": str(root),
+            "ok": False,
+            "reason": "root not exists or not directory",
+            "deleted_files": 0,
+            "skipped_files": 0,
+            "candidates": 0,
+            "freed_bytes": 0,
+            "errors": 0,
+        }
+
+    for p in root.rglob("*"):
+        # 限制：必须在 root 之内
+        if not _is_child_path(p, root):
+            continue
+
+        # 仅文件
+        if p.is_file() or p.is_symlink():
+            if _should_skip(p):
+                skipped_files += 1
+                continue
+            try:
+                age = _file_age_days(p)
+                if age >= float(ttl_days):
+                    candidates += 1
+                    if not dry_run:
+                        size = p.stat().st_size
+                        if _safe_unlink(p):
+                            deleted_files += 1
+                            freed_bytes += size
+                        else:
+                            errors += 1
+                else:
+                    skipped_files += 1
+            except Exception:
+                errors += 1
+
+    # 可选：自底向上尝试删空目录
+    removed_dirs = 0
+    if remove_empty_dirs:
+        # 先收集所有目录，按路径长度倒序，确保先删子目录
+        dirs = sorted([d for d in root.rglob("*") if d.is_dir()], key=lambda d: len(str(d)), reverse=True)
+        for d in dirs:
+            with suppress(Exception):
+                if not any(d.iterdir()):
+                    if not dry_run and _safe_rmdir_empty(d):
+                        removed_dirs += 1
+
+    return {
+        "root": str(root),
+        "ok": True,
+        "deleted_files": deleted_files if not dry_run else 0,
+        "skipped_files": skipped_files,
+        "candidates": candidates,
+        "freed_bytes": freed_bytes if not dry_run else 0,
+        "removed_empty_dirs": removed_dirs if (remove_empty_dirs and not dry_run) else 0,
+        "errors": errors,
+        "dry_run": dry_run,
+        "ttl_days": ttl_days,
+    }
+
+async def run_cleanup_all(dry_run: bool = False) -> dict:
+    """
+    并发保护 + 同时清理 EXPORT_ROOT / MEDIA_ROOT。
+    """
+    async with _cleanup_lock:
+        exp = _clean_dir_once(EXPORT_ROOT, EXPORT_TTL_DAYS, dry_run=dry_run, remove_empty_dirs=CLEAN_REMOVE_EMPTY_DIRS)
+        med = _clean_dir_once(MEDIA_ROOT,  MEDIA_TTL_DAYS,  dry_run=dry_run, remove_empty_dirs=CLEAN_REMOVE_EMPTY_DIRS)
+        total = {
+            "ok": exp.get("ok") and med.get("ok"),
+            "export": exp,
+            "media": med,
+            "ts": int(time.time()),
+        }
+        # 也可以在这里写日志
+        return total
 
 
 
@@ -2175,3 +2317,32 @@ async def submit_suggestion(
         raise HTTPException(status_code=500, detail=f"添加发送任务失败：{e}")
 
     return {"ok": True, "queued": True, "message": "建议已接收并将邮件发送给管理员"}
+
+@app.on_event("startup")
+async def on_startup():
+    await init_db()
+    await docnumber_create_tables()
+
+    async def _periodic_cleanup():
+        try:
+            while True:
+                try:
+                    await run_cleanup_all(dry_run=False)
+                except Exception:
+                    # 防止异常中断循环
+                    pass
+                await asyncio.sleep(CLEAN_INTERVAL_MINUTES * 60)
+        except asyncio.CancelledError:
+            # 优雅退出
+            pass
+
+    app.state.cleanup_task = asyncio.create_task(_periodic_cleanup())
+
+# 优雅停止（可选）
+@app.on_event("shutdown")
+async def on_shutdown():
+    task = getattr(app.state, "cleanup_task", None)
+    if task:
+        task.cancel()
+        with suppress(Exception):
+            await task
