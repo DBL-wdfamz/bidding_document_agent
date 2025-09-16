@@ -29,6 +29,10 @@ import hashlib
 import json
 from pathlib import Path
 
+import httpx
+from urllib.parse import urlparse
+from sqlalchemy import text as sql_text
+
 from json2doc import render_docx,docx_to_pdf
 from bid_review_package.draft_generator import generate_draft_stream
 from bid_review_package.review_agents import (
@@ -86,6 +90,17 @@ KB_BASE_ROOT.mkdir(parents=True, exist_ok=True)
 FORMWORK_ROOT = Path(os.getenv("FORMWORK_ROOT", "static/formwork")).resolve()
 FORMWORK_ROOT.mkdir(parents=True, exist_ok=True)
 MAX_REF_CHARS = 2000
+
+ENABLE_EXTERNAL_SOURCES = os.getenv("ENABLE_EXTERNAL_SOURCES", "false").lower() == "true"
+# 允许访问的 HTTP 主机白名单，逗号分隔；支持裸域或端口，如: "api.yourcorp.com,10.0.0.5:8080"
+EXTERNAL_HTTP_ALLOWED_HOSTS = [h.strip().lower() for h in os.getenv("EXTERNAL_HTTP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+EXTERNAL_HTTP_TIMEOUT = float(os.getenv("EXTERNAL_HTTP_TIMEOUT", "10"))   # 秒
+EXTERNAL_HTTP_MAX_BYTES = int(os.getenv("EXTERNAL_HTTP_MAX_BYTES", "2_000_000"))  # 最大读取 2MB
+EXTERNAL_HTTP_ALLOW_METHODS = {"get","post"}  # 严格限制
+# DB 访问限制
+EXTERNAL_DB_TIMEOUT = float(os.getenv("EXTERNAL_DB_TIMEOUT", "10"))       # 秒
+EXTERNAL_DB_MAX_ROWS = int(os.getenv("EXTERNAL_DB_MAX_ROWS", "200"))      # 行上限
+
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
@@ -232,6 +247,21 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(min_length=6, max_length=64)
 
 
+class ExternalAPIConfig(BaseModel):
+    url: str
+    method: Literal["get", "post"] = "get"
+    headers: Optional[dict] = None
+    params: Optional[dict] = None
+    json: Optional[dict] = None
+    # 允许选择仅保留部分字段（可选）；不填则原样截断后纳入
+    pick_keys: Optional[List[str]] = None
+
+class ExternalDBConfig(BaseModel):
+    dsn: str  # SQLAlchemy 异步 DSN，如：postgresql+asyncpg://user:pass@host:5432/dbname
+    query: str  # 只允许 SELECT（或 with...select）
+    params: Optional[dict] = None
+    max_rows: Optional[int] = None  # 不填则用全局 EXTERNAL_DB_MAX_ROWS
+
 class JobOverview(BaseModel):
     """用于任务列表的摘要视图"""
     job_id: str
@@ -284,6 +314,9 @@ class GenerateIn(BaseModel):
     template_id: str
     references: list = []
 
+    external_apis: Optional[List[ExternalAPIConfig]] = None
+    external_dbs: Optional[List[ExternalDBConfig]] = None
+
 class GenerateOut(BaseModel):
     job_id: str
     result: dict  # 最终合并后的 JSON
@@ -332,6 +365,7 @@ class DocNumberUpdateIn(BaseModel):
 
 class SuggestIn(BaseModel):
     suggestions: str = Field(min_length=1, description="用户建议文本")
+
 
 # =========================
 # 依赖：获取当前用户
@@ -613,20 +647,75 @@ def _extract_json_substring(buf: str) -> str | None:
 
 def extract_text_blocks_from_document(doc: dict) -> list[str]:
     """
-    从 document JSON 中提取所有文本（contentBlocks[].content[].text）
-    返回每个段落的纯文本列表
+    兼容性文本抽取：
+    - 支持本例：contentBlocks[*].content 为“字符串”
+    - 也支持：contentBlocks[*].content 为“list/dict”，内部含 text/insert/value …
+    - 同时把 docInfo.title/docNumber 等显著字段也纳入
     """
-    out = []
-    try:
-        blocks = doc.get("contentBlocks", [])
-        for blk in blocks:
-            for run in blk.get("content", []):
-                txt = str(run.get("text", "")).strip()
-                if txt:
-                    out.append(txt)
-    except Exception:
-        pass
-    return out
+    out: list[str] = []
+
+    def _push(s: str):
+        s = (s or "").strip()
+        if not s:
+            return
+        # 过滤纯装饰符号
+        import re
+        if re.fullmatch(r"[\s\-_.•|/\\~·★☆=]+", s):
+            return
+        out.append(s)
+
+    # 先拿 docInfo 里显著字段（标题、文号等）
+    if isinstance(doc, dict):
+        di = doc.get("docInfo", {})
+        if isinstance(di, dict):
+            for k in ("title", "docNumber", "subtitle", "summary"):
+                v = di.get(k)
+                if isinstance(v, str):
+                    _push(v)
+
+    # 重点处理 contentBlocks
+    cbs = doc.get("contentBlocks", [])
+    if isinstance(cbs, list):
+        for blk in cbs:
+            # 1) 直接是字符串（就是你现在这个结构）
+            if isinstance(blk, dict) and isinstance(blk.get("content"), str):
+                _push(blk["content"])
+                continue
+
+            # 2) 复杂 run 结构（content 是 list/dict）
+            def walk(node):
+                if node is None:
+                    return
+                if isinstance(node, str):
+                    _push(node)
+                    return
+                if isinstance(node, list):
+                    for x in node:
+                        walk(x)
+                    return
+                if isinstance(node, dict):
+                    # 常见文本键
+                    for key in ("text", "insert", "value", "contentText", "caption", "heading", "title"):
+                        v = node.get(key)
+                        if isinstance(v, str):
+                            _push(v)
+                    # 递归所有子节点
+                    for v in node.values():
+                        if isinstance(v, (dict, list, str)):
+                            walk(v)
+
+            if isinstance(blk, dict):
+                walk(blk.get("content"))
+
+    # 去重保序
+    seen = set()
+    deduped = []
+    for t in out:
+        if t not in seen:
+            seen.add(t)
+            deduped.append(t)
+    return deduped
+
 
 def chunk_texts(texts: list[str], max_len: int = 500) -> list[str]:
     """
@@ -1149,6 +1238,123 @@ async def run_cleanup_all(dry_run: bool = False) -> dict:
         # 也可以在这里写日志
         return total
 
+def _host_in_allowlist(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower()  # 可能是 host:port
+        # 允许 host 完全匹配或明确 host:port 匹配
+        return host in EXTERNAL_HTTP_ALLOWED_HOSTS
+    except Exception:
+        return False
+
+def _looks_like_safe_select(sql: str) -> bool:
+    s = (sql or "").strip().lower()
+    # 允许 'select ...' 或 'with ... select ...'；拒绝 ; 与敏感关键词
+    if ";" in s:  # 防注入拼接
+        return False
+    bad = [" insert ", " update ", " delete ", " drop ", " alter ", " create ", " grant ", " revoke ", " truncate "]
+    if any(b in f" {s} " for b in bad):
+        return False
+    return s.startswith("select") or s.startswith("with ")
+
+async def _fetch_external_api_one(cfg: ExternalAPIConfig) -> dict:
+    if not ENABLE_EXTERNAL_SOURCES:
+        return {"ok": False, "error": "external sources disabled"}
+    if cfg.method not in EXTERNAL_HTTP_ALLOW_METHODS:
+        return {"ok": False, "error": f"method {cfg.method} not allowed"}
+    if not _host_in_allowlist(cfg.url):
+        return {"ok": False, "error": "host not in allowlist"}
+
+    try:
+        async with httpx.AsyncClient(timeout=EXTERNAL_HTTP_TIMEOUT, follow_redirects=False) as client:
+            if cfg.method == "get":
+                resp = await client.get(cfg.url, headers=cfg.headers, params=cfg.params)
+            else:
+                resp = await client.post(cfg.url, headers=cfg.headers, params=cfg.params, json=cfg.json)
+        ct = (resp.headers.get("content-type") or "").lower()
+        raw = resp.content[:EXTERNAL_HTTP_MAX_BYTES]
+
+        if "application/json" in ct:
+            data = resp.json()
+        else:
+            # 非 JSON 就当文本；避免巨大二进制
+            data = raw.decode("utf-8", errors="replace")
+
+        if cfg.pick_keys and isinstance(data, dict):
+            data = {k: data.get(k) for k in cfg.pick_keys}
+
+        return {
+            "ok": resp.is_success,
+            "status": resp.status_code,
+            "data": data if resp.is_success else (data if isinstance(data, str) else {"body": data}),
+            "url": cfg.url,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "url": cfg.url}
+
+async def _query_external_db_one(cfg: ExternalDBConfig) -> dict:
+    if not ENABLE_EXTERNAL_SOURCES:
+        return {"ok": False, "error": "external sources disabled"}
+    if not _looks_like_safe_select(cfg.query):
+        return {"ok": False, "error": "only read-only SELECT is allowed"}
+
+    max_rows = int(cfg.max_rows or EXTERNAL_DB_MAX_ROWS)
+    # 尽力在 SQL 层面加个 limit（不强行解析 SQL，简单追加）
+    q = cfg.query.strip()
+    q_wrapped = f"SELECT * FROM ({q}) AS _t LIMIT {max_rows}"
+
+    try:
+        # 为避免与你主库混淆，临时引擎（短连接）
+        aengine = create_async_engine(cfg.dsn, echo=False, future=True)
+        async with aengine.connect() as conn:
+            conn = await conn.execution_options(timeout=EXTERNAL_DB_TIMEOUT)
+            rs = await conn.execute(sql_text(q_wrapped), cfg.params or {})
+            rows = rs.fetchall()
+            cols = rs.keys()
+        await aengine.dispose()
+        data = [dict(zip(cols, r)) for r in rows]
+        return {"ok": True, "rows": len(data), "data": data}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def _summarize_for_prompt(obj, limit=MAX_REF_CHARS) -> str:
+    """将任意对象变成简短文本，保护中文与结构，超长截断。"""
+    try:
+        if isinstance(obj, (dict, list)):
+            s = json.dumps(obj, ensure_ascii=False)
+        else:
+            s = str(obj)
+    except Exception:
+        s = str(obj)
+    s = s.strip().replace("\r", "")
+    return (s[:limit] + "……【已截断】") if len(s) > limit else s
+
+def build_external_hint_text(api_results: list | None, db_results: list | None) -> str:
+    """把外部 API / DB 的结果转成提示词段落（纯文本），供拼接到 core_requirements。"""
+    lines: list[str] = []
+    if api_results:
+        for i, it in enumerate(api_results or []):
+            if not isinstance(it, dict):
+                continue
+            if it.get("ok"):
+                data = it.get("data")
+                lines.append(f"【外部接口#{i+1} {it.get('url','')} 成功】\n{_summarize_for_prompt(data)}")
+            else:
+                # 失败也写入简单提示，便于回溯
+                reason = it.get("error") or f"HTTP {it.get('status')}"
+                lines.append(f"【外部接口#{i+1} {it.get('url','')} 失败】{reason}")
+    if db_results:
+        for i, it in enumerate(db_results or []):
+            if not isinstance(it, dict):
+                continue
+            if it.get("ok"):
+                rows = it.get("rows", 0)
+                preview = (it.get("data") or [])[:5]   # 只预览前5行
+                lines.append(f"【外部数据库#{i+1} 成功，返回 {rows} 行】预览：\n{_summarize_for_prompt(preview)}")
+            else:
+                lines.append(f"【外部数据库#{i+1} 失败】{it.get('error')}")
+    return "\n\n".join(lines).strip()
+
+
 
 
 # 你的真实实现可替换这个占位版本
@@ -1162,6 +1368,30 @@ app = FastAPI(title="Auth Demo", version="1.0.0")
 async def on_startup():
     await init_db()
     await docnumber_create_tables()
+
+    async def _periodic_cleanup():
+        try:
+            while True:
+                try:
+                    await run_cleanup_all(dry_run=False)
+                except Exception:
+                    # 防止异常中断循环
+                    pass
+                await asyncio.sleep(CLEAN_INTERVAL_MINUTES * 60)
+        except asyncio.CancelledError:
+            # 优雅退出
+            pass
+
+    app.state.cleanup_task = asyncio.create_task(_periodic_cleanup())
+
+# 优雅停止（可选）
+@app.on_event("shutdown")
+async def on_shutdown():
+    task = getattr(app.state, "cleanup_task", None)
+    if task:
+        task.cancel()
+        with suppress(Exception):
+            await task
 
 # ========== Auth 路由 ==========
 @app.post("/auth/register", response_model=PublicUser, summary="注册")
@@ -1374,6 +1604,27 @@ async def generate_job_ndjson(
         information=payload.information,
         references=payload.references,
     )
+
+    # ========== 外部数据（如果启用） -> 生成可读提示文本，并拼进 core_requirements ==========
+    api_results, db_results = [], []
+    if ENABLE_EXTERNAL_SOURCES:
+        if payload.external_apis:
+            api_results = await asyncio.gather(*[ _fetch_external_api_one(cfg) for cfg in payload.external_apis ])
+        if payload.external_dbs:
+            db_results = await asyncio.gather(*[ _query_external_db_one(cfg) for cfg in payload.external_dbs ])
+
+        ext_hint = build_external_hint_text(api_results, db_results)
+        if ext_hint:
+            combined_information = (
+                (combined_information + "\n\n") if combined_information else ""
+            ) + "【外部数据摘要】\n" + ext_hint
+    else:
+        # 如果禁用但前端传了配置，可给出温和提示（可选）
+        if payload.external_apis or payload.external_dbs:
+            combined_information = (
+                (combined_information + "\n\n") if combined_information else ""
+            ) + "【外部数据摘要】外部数据源功能已禁用（请设置 ENABLE_EXTERNAL_SOURCES=true 以启用）。"
+
 
     # 3) 组织提示文本
     generation_data = {
@@ -2318,31 +2569,6 @@ async def submit_suggestion(
 
     return {"ok": True, "queued": True, "message": "建议已接收并将邮件发送给管理员"}
 
-@app.on_event("startup")
-async def on_startup():
-    await init_db()
-    await docnumber_create_tables()
 
-    async def _periodic_cleanup():
-        try:
-            while True:
-                try:
-                    await run_cleanup_all(dry_run=False)
-                except Exception:
-                    # 防止异常中断循环
-                    pass
-                await asyncio.sleep(CLEAN_INTERVAL_MINUTES * 60)
-        except asyncio.CancelledError:
-            # 优雅退出
-            pass
 
-    app.state.cleanup_task = asyncio.create_task(_periodic_cleanup())
 
-# 优雅停止（可选）
-@app.on_event("shutdown")
-async def on_shutdown():
-    task = getattr(app.state, "cleanup_task", None)
-    if task:
-        task.cancel()
-        with suppress(Exception):
-            await task
