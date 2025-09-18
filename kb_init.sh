@@ -1,0 +1,1 @@
+python init_official_kb.py --seed-dir static/kb_initialize --kb-base-root knowledge_base_package/user_knowledge_bases --db "mysql+aiomysql://agentusercenter:wdfamzwdfamz@127.0.0.1:3306/document_agent?charset=utf8mb4" --rebuild-index
