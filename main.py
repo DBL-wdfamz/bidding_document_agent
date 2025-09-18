@@ -80,8 +80,8 @@ EXPORT_TTL_DAYS = int(os.getenv("EXPORT_TTL_DAYS", "7"))           # 导出文�
 MEDIA_TTL_DAYS  = int(os.getenv("MEDIA_TTL_DAYS", "30"))           # 媒体库文件保留天数
 CLEAN_INTERVAL_MINUTES = int(os.getenv("CLEAN_INTERVAL_MINUTES", "60"))  # 清理频率（分钟）
 CLEAN_REMOVE_EMPTY_DIRS = os.getenv("CLEAN_REMOVE_EMPTY_DIRS", "true").lower() == "true"
-EXPORT_ROOT = Path(os.getenv("EXPORT_ROOT", r"export")).resolve()
 
+EXPORT_ROOT = Path(os.getenv("EXPORT_ROOT", r"export")).resolve()
 EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", "document_agent/media")).resolve()
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -787,7 +787,7 @@ async def query_kbs_and_collect_ctx(
     rows = await db.execute(
         select(KnowledgeBase).where(
             KnowledgeBase.id.in_(kb_int_ids),
-            KnowledgeBase.owner == owner_id,
+            KnowledgeBase.owner.in_([owner_id, 0]),
         )
     )
     kb_rows = rows.scalars().all()
@@ -797,8 +797,7 @@ async def query_kbs_and_collect_ctx(
     merged: list[dict] = []
     for kb_row in kb_rows:
         # 统一用 Path 拼，避免分隔符问题（Windows/Linux 皆可）
-        kb_path = Path("document_agent") / "knowledge_base_package" / "user_knowledge_bases" / str(owner_id) / kb_row.knowledge_bases_id / "faiss_index"
-        print(kb_path)
+        kb_path = Path("document_agent") / "knowledge_base_package" / "user_knowledge_bases" / str(kb_row.owner) / kb_row.knowledge_bases_id / "faiss_index"
         kb = KBIndex(db_path=str(kb_path))
         try:
             hits = kb.query_with_score(query_text=query_text, top_k=per_kb_top_k, recall_k=recall_k)
@@ -1366,8 +1365,8 @@ app = FastAPI(title="Auth Demo", version="1.0.0")
 
 @app.on_event("startup")
 async def on_startup():
-    await init_db()
-    await docnumber_create_tables()
+    #await init_db()
+    #await docnumber_create_tables()
 
     async def _periodic_cleanup():
         try:
@@ -1933,25 +1932,18 @@ async def get_job_reviews(
 
 
 @app.get("/api/v1/knowledgebases/", response_model=List[KnowledgeBaseOut],
-         summary="获取当前用户的所有知识库信息 - 需JWT")
+         summary="获取当前用户与官方的知识库 - 需JWT")
 async def get_my_knowledgebases(
         db: Annotated[AsyncSession, Depends(get_db)],
         current_user: Annotated[User, Depends(require_auth())],
 ):
-    """
-    通过JWT验证用户身份，检索并返回该用户创建的所有知识库的详细信息。
-    """
-    # 使用 select 语句查询 knowledge_bases 表中 owner 等于当前用户 ID 的所有记录
-    q = select(KnowledgeBase).where(KnowledgeBase.owner == current_user.id)
-
+    q = select(KnowledgeBase).where(KnowledgeBase.owner.in_([current_user.id, 0]))
     result = await db.execute(q)
     knowledge_bases = result.scalars().all()
-
-    # 返回 KnowledgeBaseOut 列表，Pydantic 会自动从 SQLAlchemy 对象中转换数据
     return knowledge_bases
 
 
-@app.get("/api/v1/templates/", response_model=List[TemplateOut], summary="获取当前用户的所有模板信息 - 需JWT")
+@app.get("/api/v1/templates/", response_model=List[TemplateOut], summary="获取当前用户的所有模板和官方模板信息 - 需JWT")
 async def get_my_templates(
         db: Annotated[AsyncSession, Depends(get_db)],
         current_user: Annotated[User, Depends(require_auth())],
@@ -1960,7 +1952,7 @@ async def get_my_templates(
     通过JWT验证用户身份，检索并返回该用户创建的所有模板的详细信息。
     """
     # 使用 select 语句查询 templates 表中 owner 等于当前用户 ID 的所有记录
-    q = select(Template).where(Template.owner == current_user.id)
+    q = select(Template).where(Template.owner.in_([current_user.id, 0]))
 
     result = await db.execute(q)
     templates = result.scalars().all()
@@ -2031,7 +2023,7 @@ async def get_kb_files(
     kb = await db.get(KnowledgeBase, knowledgebase_id)
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
-    if kb.owner != current_user.id:
+    if kb.owner not in (current_user.id, 0):
         raise HTTPException(status_code=403, detail="Not authorized to access this knowledge base")
 
     # 2) 查询 kb_files
