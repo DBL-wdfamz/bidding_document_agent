@@ -80,8 +80,8 @@ EXPORT_TTL_DAYS = int(os.getenv("EXPORT_TTL_DAYS", "7"))           # 导出文�
 MEDIA_TTL_DAYS  = int(os.getenv("MEDIA_TTL_DAYS", "30"))           # 媒体库文件保留天数
 CLEAN_INTERVAL_MINUTES = int(os.getenv("CLEAN_INTERVAL_MINUTES", "60"))  # 清理频率（分钟）
 CLEAN_REMOVE_EMPTY_DIRS = os.getenv("CLEAN_REMOVE_EMPTY_DIRS", "true").lower() == "true"
+EXPORT_ROOT = Path(os.getenv("EXPORT_ROOT", r"export")).resolve()
 
-EXPORT_ROOT = Path(os.getenv("EXPORT_ROOT", r"D:\project\document_agent\exports")).resolve()
 EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", "document_agent/media")).resolve()
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)

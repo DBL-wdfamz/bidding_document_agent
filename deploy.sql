@@ -1,3 +1,14 @@
+CREATE DATABASE IF NOT EXISTS `document_agent` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE USER IF NOT EXISTS 'agentusercenter'@'127.0.0.1' IDENTIFIED BY 'wdfamzwdfamz';
+-- 确保密码被设置/重置（兼容已存在用户）
+ALTER USER 'agentusercenter'@'127.0.0.1' IDENTIFIED BY 'wdfamzwdfamz';
+
+GRANT ALL PRIVILEGES ON `document_agent`.* TO 'agentusercenter'@'127.0.0.1';
+FLUSH PRIVILEGES;
+
+use document_agent;
+
 CREATE TABLE users (
     id INT AUTO_INCREMENT PRIMARY KEY,
     email VARCHAR(255) NOT NULL,
