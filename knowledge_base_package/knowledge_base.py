@@ -5,6 +5,7 @@ import os
 import pandas as pd
 from docx import Document
 from typing import List, Set, Optional, Dict
+from pathlib import Path
 
 # ==================== 模块零：全局配置与依赖 ====================
 from huggingface_hub import snapshot_download
@@ -14,6 +15,11 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+
+# 新增：定义模型缓存目录，直接在项目根目录下
+MODELS_ROOT = Path("models")
+MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+
 
 class KnowledgeBase:
     """
@@ -42,13 +48,20 @@ class KnowledgeBase:
 
     @staticmethod
     def _prepare_model(model_name: str) -> str:
+        """
+        准备模型，优先从本地 models 目录加载，否则下载到该目录。
+        """
+        # 指定缓存目录为项目下的 models
+        cache_path = MODELS_ROOT
         try:
-            model_path = snapshot_download(model_name, local_files_only=True)
-            print(f"Model '{model_name}' found in local cache.")
+            # 优先从指定缓存目录加载
+            model_path = snapshot_download(model_name, cache_dir=cache_path, local_files_only=True)
+            print(f"Model '{model_name}' found in local cache: {cache_path}")
             return model_path
         except FileNotFoundError:
-            print(f"Model '{model_name}' not found locally. Starting download...")
-            model_path = snapshot_download(model_name, local_files_only=False)
+            print(f"Model '{model_name}' not found locally. Starting download to {cache_path}...")
+            # 下载到指定缓存目录
+            model_path = snapshot_download(model_name, cache_dir=cache_path, local_files_only=False)
             print("Model downloaded successfully.")
             return model_path
 

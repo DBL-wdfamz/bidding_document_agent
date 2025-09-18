@@ -9,6 +9,7 @@ pydantic==2.9.2
 email-validator==2.2.0
 python-docx
 docx2pdf
+python-multipart
 
 # MySQL 异步驱动
 aiomysql==0.2.0
